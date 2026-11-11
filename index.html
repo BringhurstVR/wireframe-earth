@@ -36,7 +36,7 @@
   </div>
   <div id="status"></div>
 </div>
-<div id="attrib">Borders: Natural Earth (public domain) · Cities: © GeoNames (CC BY 4.0)<br>Prototype v1.3 — built for Dan</div>
+<div id="attrib">Borders: Natural Earth (public domain) · Cities: © GeoNames (CC BY 4.0)<br>Prototype v1.4 — built for Dan</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -127,15 +127,15 @@ function haversineKm(a, b) {
 
 // Shared portal uniforms: the planet is SOLID by default. When the user aims through it,
 // a soft circular window opens around the aim direction (far-side patch) / entry point (body).
-const PORTAL = { uAimDir: { value: new THREE.Vector3(0, 1, 0) }, uAmt: { value: 0 } };
-const PORTAL_COS_OUT = 0.984, PORTAL_COS_IN = 0.994; // ~10 deg soft edge -> ~6 deg full opening (a circular window, rest stays solid)
+const PORTAL = { uAimDir: { value: new THREE.Vector3(0, 1, 0) }, uAmt: { value: 0 }, uAimDir2: { value: new THREE.Vector3(0, 1, 0) }, uAmt2: { value: 0 } };
+const PORTAL_COS_OUT = 0.9367, PORTAL_COS_IN = 0.9763; // v1.4: window diameter DOUBLED vs v1.3 (Dan: too small) — v1.3 was 6.3 deg full-open / 10.3 deg soft edge; v1.4 is 12.5 / 20.5 deg
 function portalLineMaterial(color, portalOp) {
   return new THREE.ShaderMaterial({
-    uniforms: { uAimDir: PORTAL.uAimDir, uAmt: PORTAL.uAmt, uColor: { value: new THREE.Color(color) }, uOp: { value: portalOp } },
+    uniforms: { uAimDir: PORTAL.uAimDir, uAmt: PORTAL.uAmt, uAimDir2: PORTAL.uAimDir2, uAmt2: PORTAL.uAmt2, uColor: { value: new THREE.Color(color) }, uOp: { value: portalOp } },
     vertexShader: "varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }",
-    fragmentShader: "uniform vec3 uAimDir; uniform float uAmt; uniform vec3 uColor; uniform float uOp; varying vec3 vP;" +
-      "void main(){ float d = dot(normalize(vP), normalize(uAimDir)); float f = smoothstep(" + PORTAL_COS_OUT + ", " + PORTAL_COS_IN + ", d);" +
-      " float a = uOp * f * uAmt; if (a < 0.004) discard; gl_FragColor = vec4(uColor, a); }",
+    fragmentShader: "uniform vec3 uAimDir; uniform float uAmt; uniform vec3 uAimDir2; uniform float uAmt2; uniform vec3 uColor; uniform float uOp; varying vec3 vP;" +
+      "void main(){ vec3 nP = normalize(vP); float f = max(smoothstep(" + PORTAL_COS_OUT + ", " + PORTAL_COS_IN + ", dot(nP, normalize(uAimDir))) * uAmt, smoothstep(" + PORTAL_COS_OUT + ", " + PORTAL_COS_IN + ", dot(nP, normalize(uAimDir2))) * uAmt2);" +
+      " float a = uOp * f; if (a < 0.004) discard; gl_FragColor = vec4(uColor, a); }",
     transparent: true, depthTest: false
   });
 }
@@ -189,29 +189,32 @@ function buildMapTexture() {
   }
   return new THREE.CanvasTexture(cv);
 }
-const BODY_U = { uEntryPoint: { value: new THREE.Vector3(0, R_TRUE, 0) }, uEyeLocal: { value: new THREE.Vector3(0, R_TRUE + 2, 0) }, uAmt: { value: 0 } };
+const BODY_U = { uEntryPoint: { value: new THREE.Vector3(0, R_TRUE, 0) }, uEntryPoint2: { value: new THREE.Vector3(0, R_TRUE, 0) }, uEyeLocal: { value: new THREE.Vector3(0, R_TRUE + 2, 0) }, uAmt: { value: 0 }, uAmt2: { value: 0 } };
 // Body = MeshBasicMaterial(map) + onBeforeCompile cone-window discard. (A hand-written ShaderMaterial
 // version rendered correctly but failed to occlude the far side in headless Chromium — the standard
 // material's depth behaviour is the reliable path.)
 const bodyMat = new THREE.MeshBasicMaterial({ map: buildMapTexture() });
 bodyMat.onBeforeCompile = (sh) => {
   sh.uniforms.uEntryPoint = BODY_U.uEntryPoint;
+  sh.uniforms.uEntryPoint2 = BODY_U.uEntryPoint2;
   sh.uniforms.uEyeLocal = BODY_U.uEyeLocal;
   sh.uniforms.uAmt = BODY_U.uAmt;
+  sh.uniforms.uAmt2 = BODY_U.uAmt2;
   sh.vertexShader = sh.vertexShader
     .replace("#include <common>", "#include <common>\nvarying vec3 vWp;")
     .replace("#include <begin_vertex>", "#include <begin_vertex>\nvWp = position;");
   sh.fragmentShader = sh.fragmentShader
-    .replace("#include <common>", "#include <common>\nvarying vec3 vWp;\nuniform vec3 uEntryPoint;\nuniform vec3 uEyeLocal;\nuniform float uAmt;\nfloat gOpenF = 0.0;")
+    .replace("#include <common>", "#include <common>\nvarying vec3 vWp;\nuniform vec3 uEntryPoint;\nuniform vec3 uEntryPoint2;\nuniform vec3 uEyeLocal;\nuniform float uAmt;\nuniform float uAmt2;\nfloat gOpenF = 0.0;")
     .replace("#include <clipping_planes_fragment>", `#include <clipping_planes_fragment>
-      { vec3 toF = vWp - uEyeLocal; vec3 toE = uEntryPoint - uEyeLocal;
-        float ca = dot(normalize(toF), normalize(toE));
-        gOpenF = smoothstep(0.9816, 0.9945, ca) * uAmt;
+      { vec3 toFd = normalize(vWp - uEyeLocal);
+        float ca1 = dot(toFd, normalize(uEntryPoint - uEyeLocal));
+        float ca2 = dot(toFd, normalize(uEntryPoint2 - uEyeLocal));
+        gOpenF = max(smoothstep(0.9367, 0.9763, ca1) * uAmt, smoothstep(0.9367, 0.9763, ca2) * uAmt2);
         if (gOpenF > 0.97) discard; }`)
     .replace("#include <map_fragment>", `#include <map_fragment>
       diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.62, 0.84, 1.0), gOpenF * 0.55);`);
 };
-bodyMat.customProgramCacheKey = () => "we-body-v13";
+bodyMat.customProgramCacheKey = () => "we-body-v14";
 const body = new THREE.Mesh(new THREE.SphereGeometry(R_TRUE * 0.999, 64, 48), bodyMat);
 body.renderOrder = 0;
 globe.add(body);
@@ -240,6 +243,14 @@ let borderLines = null, beaconLines = null, cityPointsMat = null; // beaconLines
   for (let lon = -180; lon < 180; lon += 15) { const r = []; for (let lat = -90; lat <= 90; lat += 3) r.push([lon, lat]); rings.push(r); }
   globe.add(dualLines(segsFromRings(rings, R_TRUE, 0.3), 0x2c5d8a, 0.38, 0.5));
 }
+// v1.4: representative cluster heights are capped at 0.9 km — the order of the tallest
+// real skyscrapers. In v1.3 they reached 58 km (six Everests): a 58 km tower's own horizon
+// is ~860 km away, which (with labels floating at R+26 and constant-pixel-size city points)
+// is why cities hundreds of km off stood in full view from near the surface. At realistic
+// heights, geometry + the solid planet's depth occlusion put beyond-horizon cities
+// genuinely below the limb. The planet geometry itself was already true scale in v1.3;
+// the visibility was not.
+function cityTopKm(pop) { return Math.min(0.9, 0.10 + 0.20 * Math.log10((pop || 1000) / 1000 + 1)); }
 // cities: SOLID representative buildings (simple blocks — the city data is points only, so these are
 // a representation scaled by population, not real skylines) + far-visible points.
 // Buildings sit on the surface with depth testing on, so they disappear behind the planet's curve.
@@ -253,15 +264,23 @@ let cityBuildings = null;
     const base = llToVec(c.la, c.lo, R_TRUE + 0.8);
     pts.push(base.x, base.y, base.z);
     const pop = c.p || 1000;
-    const hMax = Math.min(58, 12 + 30 * Math.log10(pop / 1000 + 1));
-    const nB = pop >= 1e7 ? 6 : pop >= 5e6 ? 5 : pop >= 1e6 ? 4 : pop >= 2e5 ? 3 : 2;
-    const spread = 3 + Math.min(10, hMax * 0.22);
+    const hMax = cityTopKm(pop);
+    // v1.4 CLUSTERS (Dan): not single haphazard rectangles — a deterministic mini-city per
+    // city point: tallest tower at the centre, a ring of mid-rise around it, smaller blocks
+    // on the rim, like scanning over a stylised city map.
+    const nB = pop >= 1e7 ? 13 : pop >= 5e6 ? 11 : pop >= 1e6 ? 9 : pop >= 2e5 ? 7 : 5;
+    const clusterR = 1.5 + Math.min(6, 1.1 * Math.log10(pop / 1000 + 1)); // footprint from population: width, not height, is what reads from altitude
     const rand = rng((Math.floor((c.la + 90) * 1000) * 73856093) ^ (Math.floor((c.lo + 180) * 1000) * 19349663) ^ pop);
+    const baseAng = rand() * Math.PI * 2;
     for (let k = 0; k < nB; k++) {
-      const offE = (rand() * 2 - 1) * spread, offN = (rand() * 2 - 1) * spread;
+      let rr, ang, hFrac, wMul;
+      if (k === 0) { rr = 0; ang = 0; hFrac = 1.0; wMul = 1.25; }
+      else if (k <= 4) { rr = clusterR * 0.48; ang = baseAng + (k - 1) / 4 * Math.PI * 2 + (rand() - 0.5) * 0.5; hFrac = 0.55 + rand() * 0.2; wMul = 0.85; }
+      else { rr = clusterR * (0.85 + rand() * 0.3); ang = baseAng + (k - 5) / Math.max(1, nB - 5) * Math.PI * 2 + (rand() - 0.5) * 0.5; hFrac = 0.3 + rand() * 0.2; wMul = 0.7; }
+      const offE = Math.cos(ang) * rr, offN = Math.sin(ang) * rr;
       const la2 = c.la + offN / 111.0, lo2 = c.lo + offE / (111.0 * Math.max(0.2, Math.cos(c.la * Math.PI / 180)));
-      const h = hMax * (0.4 + 0.6 * rand()), w = 2.2 + rand() * 3.2 + Math.min(3, pop / 4e6);
-      inst.push({ la: la2, lo: lo2, h, w, rot: rand() * Math.PI });
+      const h = Math.max(0.06, hMax * hFrac), w = (0.55 + rand() * 0.5) * wMul;
+      inst.push({ la: la2, lo: lo2, h, w, rot: rand() * Math.PI, cen: k === 0 });
     }
     if ((c.p >= 5e6 || (c.cap && c.p >= 8e5)) && labelCities.length < 110) labelCities.push(c);
   }
@@ -271,12 +290,12 @@ let cityBuildings = null;
     const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), qr = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), col = new THREE.Color();
     inst.forEach((b, i) => {
       const nrm = llToVec(b.la, b.lo, 1).normalize();
-      const pos = llToVec(b.la, b.lo, R_TRUE + b.h / 2 - 0.5);
+      const pos = llToVec(b.la, b.lo, R_TRUE + b.h / 2 - 0.2); // base sits ON the sphere surface (0.2 embed against curvature gaps)
       q.setFromUnitVectors(up, nrm);
       qr.setFromAxisAngle(up, b.rot); q.multiply(qr);
       m4.compose(pos, q, new THREE.Vector3(b.w, b.h, b.w));
       cityBuildings.setMatrixAt(i, m4);
-      col.setHSL(0.115 + (i % 7) * 0.005, 0.85, 0.55 + (i % 5) * 0.04);
+      col.setHSL(0.115 + (i % 7) * 0.005, 0.85, b.cen ? 0.66 : 0.52 + (i % 5) * 0.03);
       cityBuildings.setColorAt(i, col);
     });
     cityBuildings.instanceMatrix.needsUpdate = true;
@@ -286,7 +305,7 @@ let cityBuildings = null;
   globe.add(cityBuildings);
   const pg = new THREE.BufferGeometry();
   pg.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
-  cityPointsMat = new THREE.PointsMaterial({ color: 0xffcf7d, size: 3, sizeAttenuation: false, transparent: true, opacity: 0.9 });
+  cityPointsMat = new THREE.PointsMaterial({ color: 0xffcf7d, size: 7, sizeAttenuation: true, transparent: true, opacity: 0.85 }); // v1.4: world-sized points — they now shrink with distance and drop below the horizon like everything else
   const points = new THREE.Points(pg, cityPointsMat);
   points.renderOrder = 3;
   globe.add(points);
@@ -306,7 +325,9 @@ function makeLabel(text) {
 for (const c of labelCities) {
   const sp = makeLabel(c.n);
   sp.userData.baseW = 46;
-  sp.position.copy(llToVec(c.la, c.lo, R_TRUE + 26));
+  sp.userData.city = c;
+  sp.userData.topKm = cityTopKm(c.p);
+  sp.position.copy(llToVec(c.la, c.lo, R_TRUE + cityTopKm(c.p) + 1.2));
   labelGroup.add(sp);
 }
 // stars
@@ -321,34 +342,166 @@ for (const c of labelCities) {
   g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
   scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0xaFC4e8, size: 1.6, sizeAttenuation: false, transparent: true, opacity: 0.85 })));
 }
-// tangent-plane grid at the user's feet: rings + radials fading with distance
-{
-  const pos = [], col = [];
-  const cIn = new THREE.Color(0x1e6f8e), cOut = new THREE.Color(0x000208);
-  function ring(r, seg = 96) {
-    const c = cIn.clone().lerp(cOut, Math.min(1, r / 420));
-    for (let i = 0; i < seg; i++) {
-      const a1 = i / seg * Math.PI * 2, a2 = (i + 1) / seg * Math.PI * 2;
-      pos.push(Math.cos(a1) * r, 0, Math.sin(a1) * r, Math.cos(a2) * r, 0, Math.sin(a2) * r);
-      col.push(c.r, c.g, c.b, c.r, c.g, c.b);
-    }
+
+// ============================== MOON & PLANETS (v1.4, Dan's request) ==============================
+// Directions are computed from a simplified built-in ephemeris (Paul Schlyter's low-precision
+// elements + the Moon's largest perturbation terms) for the CURRENT date/time and the user's
+// location. Accuracy is roughly a degree or better for the planets, ~0.3 deg for the Moon —
+// an honest approximation, not observatory ephemeris. The Moon is drawn at its true angular
+// size (~0.5 deg) as a plain disc (no phase shading); the planets are enlarged to be visible
+// at all (their real discs are arcseconds) but sit in their true directions.
+// ==== CELESTIAL (pure math — no THREE; also extracted by the v1.4 test harness) ====
+function rev(x) { return x - Math.floor(x / 360) * 360; }
+function keplerE(M, e) {
+  const rad = Math.PI / 180, deg = 180 / Math.PI;
+  let E = M + deg * e * Math.sin(M * rad) * (1 + e * Math.cos(M * rad));
+  if (e > 0.15) E = 180; // high eccentricity (Mercury): start from pi degrees for safe convergence
+  for (let i = 0; i < 8; i++) {
+    const En = E - (E - deg * e * Math.sin(E * rad) - M) / (1 - e * Math.cos(E * rad));
+    if (Math.abs(En - E) < 1e-7) { E = En; break; }
+    E = En;
   }
-  for (let r = 1; r <= 10; r++) ring(r);
-  for (let r = 20; r <= 100; r += 10) ring(r);
-  for (let r = 150; r <= 400; r += 50) ring(r);
-  for (let k = 0; k < 24; k++) {
-    const a = k / 24 * Math.PI * 2, c = cIn;
-    pos.push(Math.cos(a) * 1, 0, Math.sin(a) * 1, Math.cos(a) * 400, 0, Math.sin(a) * 400);
-    col.push(c.r, c.g, c.b, cOut.r, cOut.g, cOut.b);
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
-  g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
-  const grid = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.85 }));
-  grid.renderOrder = 2;
-  world.add(grid);
-  // a bright ring at the true horizon distance gets repositioned per-frame (mesh below in code)
+  return E;
 }
+function sunEcliptic(d) {
+  const ws = 282.9404 + 4.70935e-5 * d, e = 0.016709 - 1.151e-9 * d, Ms = rev(356.0470 + 0.9856002585 * d);
+  const E = keplerE(Ms, e), rad = Math.PI / 180;
+  const xv = Math.cos(E * rad) - e, yv = Math.sin(E * rad) * Math.sqrt(1 - e * e);
+  const v = Math.atan2(yv, xv) / rad, r = Math.sqrt(xv * xv + yv * yv);
+  return { lon: rev(v + ws), r, Ms, ws };
+}
+const CELESTIAL_ELEMENTS = {
+  Mercury: { N: 48.3313, Nd: 3.24587e-5, i: 7.0047, w: 29.1241, wd: 1.01444e-5, a: 0.387098, e: 0.205635, M: 168.6562, Md: 4.0923344368 },
+  Venus: { N: 76.6799, Nd: 2.46590e-5, i: 3.3946, w: 54.8910, wd: 1.38374e-5, a: 0.723330, e: 0.006773, M: 48.0052, Md: 1.6021302244 },
+  Mars: { N: 49.5574, Nd: 2.11081e-5, i: 1.8497, w: 286.5016, wd: 2.92961e-5, a: 1.523688, e: 0.093405, M: 18.6021, Md: 0.5240207766 },
+  Jupiter: { N: 100.4542, Nd: 2.76854e-5, i: 1.3032, w: 273.8777, wd: 1.64505e-5, a: 5.20256, e: 0.048498, M: 19.8950, Md: 0.0830853001 },
+  Saturn: { N: 113.6634, Nd: 2.38980e-5, i: 2.4886, w: 339.3939, wd: 2.97661e-5, a: 9.55475, e: 0.055546, M: 316.9670, Md: 0.0334442282 }
+};
+function helioXYZ(el, d) {
+  const rad = Math.PI / 180;
+  const N = el.N + el.Nd * d, i = el.i, w = el.w + el.wd * d, a = el.a, e = el.e, M = rev(el.M + el.Md * d);
+  const E = keplerE(M, e);
+  const xv = a * (Math.cos(E * rad) - e), yv = a * (Math.sqrt(1 - e * e) * Math.sin(E * rad));
+  const v = Math.atan2(yv, xv) / rad, r = Math.sqrt(xv * xv + yv * yv);
+  return {
+    x: r * (Math.cos(N * rad) * Math.cos((v + w) * rad) - Math.sin(N * rad) * Math.sin((v + w) * rad) * Math.cos(i * rad)),
+    y: r * (Math.sin(N * rad) * Math.cos((v + w) * rad) + Math.cos(N * rad) * Math.sin((v + w) * rad) * Math.cos(i * rad)),
+    z: r * (Math.sin((v + w) * rad) * Math.sin(i * rad))
+  };
+}
+function moonEcliptic(d) {
+  const rad = Math.PI / 180;
+  const N = 125.1228 - 0.0529538083 * d, i = 5.1454, w = 318.0634 + 0.1643573223 * d, a = 60.2666, e = 0.0549, M = rev(115.3654 + 13.0649929509 * d);
+  const E = keplerE(M, e);
+  const xv = a * (Math.cos(E * rad) - e), yv = a * (Math.sqrt(1 - e * e) * Math.sin(E * rad));
+  const v = Math.atan2(yv, xv) / rad, r = Math.sqrt(xv * xv + yv * yv);
+  const xh = r * (Math.cos(N * rad) * Math.cos((v + w) * rad) - Math.sin(N * rad) * Math.sin((v + w) * rad) * Math.cos(i * rad));
+  const yh = r * (Math.sin(N * rad) * Math.cos((v + w) * rad) + Math.cos(N * rad) * Math.sin((v + w) * rad) * Math.cos(i * rad));
+  const zh = r * (Math.sin((v + w) * rad) * Math.sin(i * rad));
+  let lon = rev(Math.atan2(yh, xh) / rad), lat = Math.atan2(zh, Math.sqrt(xh * xh + yh * yh)) / rad;
+  const sun = sunEcliptic(d);
+  const Lm = rev(N + w + M), Ls = rev(sun.ws + sun.Ms), Dm = Lm - Ls, F = Lm - N;
+  lon += -1.274 * Math.sin((M - 2 * Dm) * rad) + 0.658 * Math.sin(2 * Dm * rad) - 0.186 * Math.sin(sun.Ms * rad) - 0.059 * Math.sin((2 * M - 2 * Dm) * rad) - 0.057 * Math.sin((M - 2 * Dm + sun.Ms) * rad) + 0.053 * Math.sin((M + 2 * Dm) * rad) + 0.046 * Math.sin((2 * Dm - sun.Ms) * rad) + 0.041 * Math.sin((M - sun.Ms) * rad) - 0.035 * Math.sin(Dm * rad) - 0.031 * Math.sin((M + sun.Ms) * rad) - 0.015 * Math.sin((2 * F - 2 * Dm) * rad) + 0.011 * Math.sin((M - 4 * Dm) * rad);
+  lat += -0.173 * Math.sin((F - 2 * Dm) * rad) - 0.055 * Math.sin((M - F - 2 * Dm) * rad) - 0.046 * Math.sin((M + F - 2 * Dm) * rad) + 0.033 * Math.sin((F + 2 * Dm) * rad) + 0.017 * Math.sin((2 * M + F) * rad);
+  return { lon: rev(lon), lat, rER: r };
+}
+function celestialAltAz(name, date, lat, lon) {
+  const rad = Math.PI / 180;
+  const d = date.getTime() / 86400000 - 10956.0; // Schlyter day number (JD - 2451543.5)
+  let lo, la;
+  if (name === "Moon") { const m = moonEcliptic(d); lo = m.lon; la = m.lat; }
+  else if (name === "Sun") { const sn = sunEcliptic(d); lo = sn.lon; la = 0; }
+  else {
+    const sn = sunEcliptic(d);
+    const p = helioXYZ(CELESTIAL_ELEMENTS[name], d);
+    const xg = p.x + sn.r * Math.cos(sn.lon * rad), yg = p.y + sn.r * Math.sin(sn.lon * rad), zg = p.z;
+    lo = rev(Math.atan2(yg, xg) / rad); la = Math.atan2(zg, Math.sqrt(xg * xg + yg * yg)) / rad;
+  }
+  const ecl = 23.4393 - 3.563e-7 * d;
+  const xe = Math.cos(lo * rad) * Math.cos(la * rad), ye = Math.sin(lo * rad) * Math.cos(la * rad), ze = Math.sin(la * rad);
+  const xeq = xe, yeq = ye * Math.cos(ecl * rad) - ze * Math.sin(ecl * rad), zeq = ye * Math.sin(ecl * rad) + ze * Math.cos(ecl * rad);
+  let raH = rev(Math.atan2(yeq, xeq) / rad) / 15, dec = Math.atan2(zeq, Math.sqrt(xeq * xeq + yeq * yeq)) / rad; // let: the Moon gets a topocentric correction below
+  const GMST0 = rev(sunEcliptic(d).ws + sunEcliptic(d).Ms + 180) / 15;
+  const utH = date.getUTCHours() + date.getUTCMinutes() / 60 + date.getUTCSeconds() / 3600 + date.getUTCMilliseconds() / 3600000;
+  let lst = GMST0 + utH + lon / 15; lst = lst - Math.floor(lst / 24) * 24;
+  if (name === "Moon") {
+    // Topocentric correction (lunar parallax reaches ~1 deg — the difference between the
+    // geocentric direction and what an observer on the surface actually sees).
+    const rER = moonEcliptic(d).rER;
+    const rho = 0.99883 + 0.00167 * Math.cos(lat * rad);
+    const gclat = lat - 0.1924 * Math.sin(2 * lat * rad);
+    const raR = raH * 15 * rad, decR = dec * rad, lstR = lst * 15 * rad;
+    const tx = rER * Math.cos(decR) * Math.cos(raR) - rho * Math.cos(gclat * rad) * Math.cos(lstR);
+    const ty = rER * Math.cos(decR) * Math.sin(raR) - rho * Math.cos(gclat * rad) * Math.sin(lstR);
+    const tz = rER * Math.sin(decR) - rho * Math.sin(gclat * rad);
+    raH = rev(Math.atan2(ty, tx) / rad) / 15;
+    dec = Math.atan2(tz, Math.sqrt(tx * tx + ty * ty)) / rad;
+  }
+  let ha = (lst - raH) * 15; ha = ((ha + 180) % 360 + 360) % 360 - 180;
+  const alt = Math.asin(Math.sin(dec * rad) * Math.sin(lat * rad) + Math.cos(dec * rad) * Math.cos(lat * rad) * Math.cos(ha * rad)) / rad;
+  const cosAz = (Math.sin(dec * rad) - Math.sin(alt * rad) * Math.sin(lat * rad)) / Math.max(1e-9, Math.cos(alt * rad) * Math.cos(lat * rad));
+  let az = Math.acos(Math.min(1, Math.max(-1, cosAz))) / rad;
+  if (Math.sin(ha * rad) > 0) az = 360 - az;
+  return { alt, az, ra: raH, dec, eclLon: lo, eclLat: la };
+}
+// ==== END CELESTIAL ====
+const CELESTIAL_DIST = 21000;
+const celestialBodies = [];
+let celestialTimer = 99; // forces an update on the first throttled UI tick
+function makeSkyLabel(text) {
+  const cv = document.createElement("canvas"); cv.width = 256; cv.height = 64;
+  const x = cv.getContext("2d");
+  x.font = "600 36px system-ui"; x.textAlign = "center"; x.textBaseline = "middle";
+  x.shadowColor = "#000"; x.shadowBlur = 6; x.fillStyle = "#dfe9ff";
+  x.fillText(text, 128, 32);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cv), transparent: true, depthWrite: false }));
+  sp.scale.set(CELESTIAL_DIST * 0.03, CELESTIAL_DIST * 0.03 * 64 / 256, 1);
+  return sp;
+}
+{
+  const defs = [
+    { name: "Moon", color: 0xf4f1e4, radius: 95 },
+    { name: "Venus", color: 0xfff3c4, radius: 26 },
+    { name: "Jupiter", color: 0xffe0b3, radius: 23 },
+    { name: "Mars", color: 0xff9a66, radius: 17 },
+    { name: "Saturn", color: 0xf2e2b6, radius: 17 },
+    { name: "Mercury", color: 0xd8d8e8, radius: 12 }
+  ];
+  for (const def of defs) {
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(def.radius, 20, 14), new THREE.MeshBasicMaterial({ color: def.color }));
+    const label = makeSkyLabel(def.name);
+    scene.add(mesh); scene.add(label);
+    celestialBodies.push({ name: def.name, radius: def.radius, mesh, label, lastAltAz: null });
+  }
+}
+function updateCelestial() {
+  const now = new Date();
+  const camPos = camera.getWorldPosition(new THREE.Vector3());
+  const up = llToVec(userLoc.lat, userLoc.lon, 1).normalize();
+  const pole = new THREE.Vector3(0, 1, 0);
+  const north = pole.clone().addScaledVector(up, -up.dot(pole));
+  if (north.lengthSq() < 1e-6) north.set(0, 0, -1); else north.normalize();
+  const east = new THREE.Vector3().crossVectors(north, up);
+  const q = globe.getWorldQuaternion(new THREE.Quaternion());
+  const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.getWorldQuaternion(new THREE.Quaternion()));
+  for (const b of celestialBodies) {
+    const aa = celestialAltAz(b.name, now, userLoc.lat, userLoc.lon);
+    b.lastAltAz = aa;
+    const altR = aa.alt * Math.PI / 180, azR = aa.az * Math.PI / 180;
+    const dirW = up.clone().multiplyScalar(Math.sin(altR))
+      .addScaledVector(north, Math.cos(altR) * Math.cos(azR))
+      .addScaledVector(east, Math.cos(altR) * Math.sin(azR))
+      .applyQuaternion(q);
+    b.mesh.position.copy(camPos).addScaledVector(dirW, CELESTIAL_DIST);
+    b.label.position.copy(b.mesh.position).addScaledVector(camUp, b.radius * 2.6);
+    b.label.visible = aa.alt > -1;
+  }
+}
+// v1.4: the tangent-plane rings/radials grid that used to lie flat at the user's feet is
+// REMOVED entirely (Dan, Nov 10: it read as a flat mesh plane mixed into the planet's
+// coloured surface, and the city buildings hovered above / sank into it). The planet's
+// own spherical surface now meets the eye directly — nothing flat in between.
+
 const horizonRing = (() => {
   const g = new THREE.BufferGeometry(); const pos = [];
   for (let i = 0; i < 128; i++) {
@@ -359,11 +512,9 @@ const horizonRing = (() => {
   const m = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x37e0a0, transparent: true, opacity: 0.8 }));
   m.renderOrder = 2; world.add(m); return m;
 })();
-// "show me" arc + target marker
+// "show me" arc. Aim target markers are per-aim-state since v1.4 (see makeAimState) — the
+// single shared marker was part of the two-hands-fight-over-one-thing bug.
 let arcLine = null;
-const marker = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 10),
-  new THREE.MeshBasicMaterial({ color: 0xffe14d, depthTest: false, transparent: true, opacity: 0.95 }));
-marker.renderOrder = 6; marker.visible = false; scene.add(marker);
 
 // ============================== STATE ==============================
 const HOME = { name: "St. George, Utah", lat: 37.10415, lon: -113.58412 };
@@ -375,11 +526,10 @@ let exaggCur = 1;                 // curvature factor actually rendered (eases t
 let transition = null;            // active fly-to animation {t, dur, a, b, fromAlt, toAlt, name}
 let arcAnim = null;               // active "show me" arc draw-on animation
 let arcPulse = null;              // travelling pulse along the arc {pts, t}
-let aimThrough = false;           // pointer is currently aimed through the planet
+let aimThrough = false;           // any pointer is currently aimed through the planet
 let labelsOn = true;
 let showTarget = null;            // {name, lat, lon}
-let currentAim = null;            // latest pointer target {tgt, holder}
-let portalAmtCur = 0;             // eased portal opening 0..1 (uniforms follow this)
+const portalAmt = [0, 0];         // eased portal opening per aim slot (0 = gaze/left hand, 1 = right hand)
 let fullBubbleKey = "";           // lat,lon key of the clicked target currently in the full bubble
 const EYE_COMP = 1.6983;          // headset sits ~1.7 units above the rig; cancel it at ground level in true scale
 
@@ -445,8 +595,9 @@ function roundRect(x, a, b, w, h, r) {
 }
 // --- full info bubble: shown ONLY on trigger click (or Show me). Clean, refined, Meta-like:
 // rounded edges, blue border, flag prominent, every line fitted so nothing is ever clipped.
+const BUBBLE_DESKTOP_SCALE = 0.55, BUBBLE_VR_SCALE = 0.55 / 3; // v1.4: the VR click bubble is ONE THIRD the v1.3 size (Dan: it filled his entire field of view)
 const bubble = makePanel(1280, 800);
-bubble.mesh.scale.setScalar(0.55);
+bubble.mesh.scale.setScalar(BUBBLE_DESKTOP_SCALE);
 bubble.mesh.renderOrder = 8;
 function drawFullBubble(st, titleOverride) {
   const x = bubble.ctx; x.clearRect(0, 0, 1280, 800);
@@ -484,16 +635,28 @@ function drawBubble(lines, title, accent) {
   drawFullBubble(st, title);
 }
 // --- hover label: ONLY city + country (+flag), above the pointer tip. Nothing else.
-const hoverPanel = makePanel(768, 208);
-hoverPanel.mesh.renderOrder = 9;
-hoverPanel.mesh.visible = false;
-scene.add(hoverPanel.mesh);
-let hoverDrawnKey = "";
-function drawHoverLabel(city, countryName, code) {
+// v1.4 (Dan): EACH aim source — left controller, right controller, desktop gaze — owns its
+// OWN hover panel, target marker and drawn-label key. In v1.3 there was exactly one shared
+// panel/marker/portal, the main loop only ever aimed the FIRST visible controller, and the
+// two hands overwrote each other's state every frame: that is why the right trigger showed
+// far-side info with no window, the left behaved differently, and elements popped in/out.
+const HOVER_ANGULAR_K = 0.185; // panel scale = distance * K -> constant ~16 deg angular width at ANY distance (v1.3 clamped ~1 deg: unreadable from far away)
+function makeAimState(slot) {
+  const panel = makePanel(768, 208);
+  panel.mesh.renderOrder = 9;
+  panel.mesh.visible = false;
+  scene.add(panel.mesh);
+  const mk = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 10),
+    new THREE.MeshBasicMaterial({ color: 0xffe14d, depthTest: false, transparent: true, opacity: 0.95 }));
+  mk.renderOrder = 6; mk.visible = false; scene.add(mk);
+  return { slot, panel, marker: mk, tgt: null, drawnKey: "" };
+}
+const aimStates = { gaze: makeAimState(0), left: makeAimState(0), right: makeAimState(1) };
+function drawHoverLabel(st, city, countryName, code) {
   const key = city.n + "|" + (countryName || "");
-  if (key === hoverDrawnKey) return;
-  hoverDrawnKey = key;
-  const x = hoverPanel.ctx; x.clearRect(0, 0, 768, 208);
+  if (key === st.drawnKey) return;
+  st.drawnKey = key;
+  const x = st.panel.ctx; x.clearRect(0, 0, 768, 208);
   x.fillStyle = "rgba(7,17,32,0.92)"; roundRect(x, 6, 6, 756, 196, 40); x.fill();
   x.strokeStyle = "#4da3ff"; x.lineWidth = 5; roundRect(x, 6, 6, 756, 196, 40); x.stroke();
   x.textAlign = "left";
@@ -502,7 +665,7 @@ function drawHoverLabel(city, countryName, code) {
   x.fillText(fitText(x, city.n, 768 - 150 - 30, 62, 32, "600"), 150, 94);
   x.fillStyle = "#a9c6ee"; x.font = "50px system-ui";
   x.fillText(fitText(x, countryName || "", 768 - 150 - 30, 50, 28), 150, 164);
-  hoverPanel.tex.needsUpdate = true;
+  st.panel.tex.needsUpdate = true;
 }
 // --- location HUD ("where I am"): NOT head-pinned any more. It is a stationary panel on the
 // player rig, off to the left side, so Dan turns to look at it and can look away. The rig does not
@@ -671,7 +834,7 @@ function infoForPoint(ll) {
 let aimCandidates = null, aimCandKey = "";
 function cityAimLocal(c) {
   const pop = c.p || 1000;
-  const hMax = Math.min(58, 12 + 30 * Math.log10(pop / 1000 + 1));
+  const hMax = cityTopKm(pop);
   return llToVec(c.la, c.lo, R_TRUE + hMax * 0.35);
 }
 function pointerTarget(origin, dir) {
@@ -686,7 +849,7 @@ function pointerTarget(origin, dir) {
   for (const c of aimCandidates) {
     // sample the city's building column (base / mid / top): the closest sample decides
     const pop = c.p || 1000;
-    const hMax = Math.min(58, 12 + 30 * Math.log10(pop / 1000 + 1));
+    const hMax = cityTopKm(pop);
     let cPerp = 1e18, cT = 0, cPoint = null;
     for (const f of [0.1, 0.45, 0.8]) {
       const wp = globe.localToWorld(llToVec(c.la, c.lo, R_TRUE + hMax * f));
@@ -745,66 +908,78 @@ function pointerTarget(origin, dir) {
   return { ll, point, through, dist: t, entry, localDir, entryLocalDir, city, cityKm };
 }
 let lastAimT = performance.now();
+function slotAimState(slot) {
+  const states = slot === 0 ? [aimStates.gaze, aimStates.left] : [aimStates.right];
+  for (const st of states) if (st.tgt && st.tgt.through) return st;
+  return null;
+}
 function tickPortal() {
   const now = performance.now();
   const dt = Math.min(0.05, (now - lastAimT) / 1000); lastAimT = now;
-  const goal = (currentAim && currentAim.tgt && currentAim.tgt.through) ? 1 : 0;
-  portalAmtCur += (goal - portalAmtCur) * Math.min(1, dt * 7);
-  if (Math.abs(goal - portalAmtCur) < 0.01) portalAmtCur = goal;
-  PORTAL.uAmt.value = portalAmtCur;
-  BODY_U.uAmt.value = portalAmtCur;
-  if (currentAim && currentAim.tgt && currentAim.tgt.through) {
-    PORTAL.uAimDir.value.copy(currentAim.tgt.localDir);
-    BODY_U.uEntryPoint.value.copy(currentAim.tgt.entryLocalDir).multiplyScalar(R_TRUE);
+  aimThrough = false;
+  for (let slot = 0; slot < 2; slot++) {
+    const st = slotAimState(slot);
+    const goal = st ? 1 : 0;
+    if (st) aimThrough = true;
+    portalAmt[slot] += (goal - portalAmt[slot]) * Math.min(1, dt * 7);
+    if (Math.abs(goal - portalAmt[slot]) < 0.01) portalAmt[slot] = goal;
+    if (slot === 0) {
+      PORTAL.uAmt.value = portalAmt[0]; BODY_U.uAmt.value = portalAmt[0];
+      if (st) { PORTAL.uAimDir.value.copy(st.tgt.localDir); BODY_U.uEntryPoint.value.copy(st.tgt.entryLocalDir).multiplyScalar(R_TRUE); }
+    } else {
+      PORTAL.uAmt2.value = portalAmt[1]; BODY_U.uAmt2.value = portalAmt[1];
+      if (st) { PORTAL.uAimDir2.value.copy(st.tgt.localDir); BODY_U.uEntryPoint2.value.copy(st.tgt.entryLocalDir).multiplyScalar(R_TRUE); }
+    }
   }
 }
-// The v1.3 pointing model (Dan, Nov 10):
+// The pointing model (Dan, Nov 10; v1.4: per-controller aim states):
 //  - pointing at the planet surface: NO information — only the portal window opens (when aiming through)
 //  - hovering a city: a small label above the pointer tip with city + country (+flag) only
 //  - trigger click: the full refined bubble (see showFullBubbleFor)
 function updateAim(origin, dir, holder) {
+  const st = holder && holder.userData.aimState ? holder.userData.aimState : aimStates.gaze;
   if (holder && updateMenuAim(origin, dir, holder)) {
-    currentAim = null; aimThrough = false; hoverPanel.mesh.visible = false;
+    st.tgt = null; st.panel.mesh.visible = false; st.marker.visible = false;
     tickPortal();
     return;
   }
   const tgt = pointerTarget(origin, dir);
-  currentAim = tgt ? { tgt, holder } : null;
-  aimThrough = !!(tgt && tgt.through);
+  st.tgt = tgt;
   if (holder && holder.userData.rayLine) {
     holder.userData.rayLine.scale.set(1, 1, tgt ? Math.max(0.05, tgt.dist / 30) : 1);
   }
   if (!tgt) {
-    marker.visible = !!showTarget;
-    hoverPanel.mesh.visible = false;
+    st.marker.visible = false;
+    st.panel.mesh.visible = false;
     tickPortal();
     return;
   }
-  marker.visible = true;
-  marker.material.color.set(tgt.city ? 0x7dff9a : tgt.through ? 0xff9d2e : 0xffe14d);
-  marker.position.copy(tgt.point);
+  st.marker.visible = true;
+  st.marker.material.color.set(tgt.city ? 0x7dff9a : tgt.through ? 0xff9d2e : 0xffe14d);
+  st.marker.position.copy(tgt.point);
   const dCam = camera.getWorldPosition(_v2).distanceTo(tgt.point);
-  const ms = THREE.MathUtils.clamp(dCam * 0.006, 1.2, 90); marker.scale.set(ms, ms, ms);
-  // hover tier: city label only, perched above the pointer's target point
+  const ms = THREE.MathUtils.clamp(dCam * 0.006, 1.2, 90); st.marker.scale.set(ms, ms, ms);
+  // hover tier: city label only, perched above the pointer's target point — VIEW-relative:
+  // its scale is proportional to its distance, so its angular size never changes.
   if (tgt.city) {
     const ctryName = (countryAt(tgt.city.la, tgt.city.lo) || {}).n || countryNameForCode(tgt.city.c);
-    drawHoverLabel(tgt.city, ctryName, tgt.city.c);
+    drawHoverLabel(st, tgt.city, ctryName, tgt.city.c);
     const d = Math.max(1, dCam);
-    hoverPanel.mesh.position.copy(tgt.point);
-    hoverPanel.mesh.position.y += d * 0.045 + 1.5;
-    hoverPanel.mesh.position.addScaledVector(_v2.copy(camera.getWorldPosition(new THREE.Vector3())).sub(tgt.point).normalize(), d * 0.02);
-    const hs = THREE.MathUtils.clamp(d * 0.011, 0.7, 60);
-    hoverPanel.mesh.scale.setScalar(hs);
-    hoverPanel.mesh.lookAt(camera.getWorldPosition(new THREE.Vector3()));
-    hoverPanel.mesh.visible = true;
+    st.panel.mesh.position.copy(tgt.point);
+    st.panel.mesh.position.y += d * 0.045 + 1.5;
+    st.panel.mesh.position.addScaledVector(_v2.copy(camera.getWorldPosition(new THREE.Vector3())).sub(tgt.point).normalize(), d * 0.02);
+    st.panel.mesh.scale.setScalar(Math.max(0.05, d * HOVER_ANGULAR_K));
+    st.panel.mesh.lookAt(camera.getWorldPosition(new THREE.Vector3()));
+    st.panel.mesh.visible = true;
   } else {
-    hoverPanel.mesh.visible = false;
+    st.panel.mesh.visible = false;
   }
   tickPortal();
 }
 function showFullBubbleFor(tgt, holder) {
   const st = infoStruct(tgt.ll, tgt.through);
   drawFullBubble(st);
+  bubble.mesh.scale.setScalar(holder ? BUBBLE_VR_SCALE : BUBBLE_DESKTOP_SCALE);
   bubble.mesh.visible = true;
   fullBubbleKey = tgt.ll.lat.toFixed(2) + "," + tgt.ll.lon.toFixed(2);
   if (holder) {
@@ -868,7 +1043,7 @@ function showMe(name, lat, lon) {
   drawFullBubble(st, "🎯 " + name);
   bubble.mesh.visible = true;
   fullBubbleKey = lat.toFixed(2) + "," + lon.toFixed(2);
-  scene.attach(bubble.mesh); bubble.mesh.position.copy(camera.getWorldPosition(new THREE.Vector3())).add(new THREE.Vector3(0.4, 0.25, -0.8));
+  scene.attach(bubble.mesh); bubble.mesh.scale.setScalar(BUBBLE_DESKTOP_SCALE); bubble.mesh.position.copy(camera.getWorldPosition(new THREE.Vector3())).add(new THREE.Vector3(0.4, 0.25, -0.8));
   setStatus(`Showing ${name}: ${Math.round(info.distKm).toLocaleString()} km away. Follow the yellow arc in VR.`);
 }
 // travelling pulse sphere for the arc (child of the globe, local coords)
@@ -933,9 +1108,17 @@ for (let i = 0; i < 2; i++) {
   const ray = new THREE.Line(rayGeo, new THREE.LineBasicMaterial({ color: 0x66c8ff, transparent: true, opacity: 0.55, depthTest: false }));
   ray.renderOrder = 7; c.add(ray);
   c.userData.rayLine = ray;
+  c.userData.aimState = i === 0 ? aimStates.left : aimStates.right; // each controller object owns one aim state for the whole session
   player.add(c); controllers.push(c);
 }
 for (const c of controllers) c.addEventListener("selectstart", onSelectStart);
+for (const c of controllers) c.addEventListener("connected", () => {
+  // entering VR with controllers: retire the desktop gaze aim so its last target can't
+  // hold portal slot 0 open or leave a stale hover panel floating (v1.4 state hygiene)
+  aimStates.gaze.tgt = null;
+  aimStates.gaze.panel.mesh.visible = false;
+  aimStates.gaze.marker.visible = false;
+});
 const pressed = new Map();
 function buttonEdge(src, idx, fn) {
   const key = src.handedness + idx;
@@ -1107,10 +1290,29 @@ renderer.setAnimationLoop(() => {
   if (altUiT > 0.2) {
     altUiT = 0;
     const tA = THREE.MathUtils.clamp(altitudeKm / 3000, 0, 1);
-    if (cityPointsMat) { cityPointsMat.size = 3 - 1.3 * tA; cityPointsMat.opacity = 0.9 - 0.35 * tA; }
+    if (cityPointsMat) { cityPointsMat.size = 7 - 2 * tA; cityPointsMat.opacity = 0.85 - 0.3 * tA; }
     if (borderLines) { borderLines.children[1].material.opacity = 1.0 - 0.2 * tA; }
-    const fA = 1 + 1.5 * tA;
-    for (const sp of labelGroup.children) { sp.scale.set(sp.userData.baseW * fA, 10 * fA, 1); sp.material.opacity = 1 - 0.3 * tA; }
+    // v1.4: city name labels are VIEW-relative (constant angular size at any distance) and
+    // horizon-aware: a label hides when its city lies beyond the horizon for the current
+    // eye height, allowing for its cluster top poking above the curve.
+    const camW = camera.getWorldPosition(new THREE.Vector3());
+    const eyeHorizon = horizonKm();
+    for (const sp of labelGroup.children) {
+      const c = sp.userData.city;
+      const surfD = c ? haversineKm(userLoc, { lat: c.la, lon: c.lo }) : 0;
+      // a label appears only when the city itself is essentially within the horizon (a
+      // quarter of the cluster height is allowed for) — a floating name tag at the limb
+      // for a city whose streets are still below the curve is exactly the misleading cue
+      // Dan complained about, so labels are stricter than the building geometry itself.
+      const visRange = eyeHorizon + Math.sqrt(2 * R_TRUE * (sp.userData.topKm || 0) * 0.25);
+      sp.visible = surfD <= visRange + 10;
+      if (!sp.visible) continue;
+      const dist = Math.max(1, camW.distanceTo(sp.getWorldPosition(new THREE.Vector3())));
+      const w = dist * 0.055 * exaggCur; // * exaggCur cancels the globe's 1/exagg scale, keeping the WORLD size (and so the angular size) constant
+      sp.scale.set(w, w * 10 / 46, 1);
+      sp.material.opacity = 1;
+    }
+    celestialTimer += 0.2; if (celestialTimer > 2) { celestialTimer = 0; updateCelestial(); }
   }
   if (!renderer.xr.isPresenting) {
     camera.position.set(0, 1.7, 0);
@@ -1129,8 +1331,8 @@ renderer.setAnimationLoop(() => {
       if (!c.visible) continue;
       const o = new THREE.Vector3(), d = new THREE.Vector3(0, 0, -1);
       c.getWorldPosition(o); d.applyQuaternion(c.getWorldQuaternion(new THREE.Quaternion()));
-      updateAim(o, d, c);
-      done = true; break;
+      updateAim(o, d, c); // v1.4: EVERY visible controller aims, every frame — no break
+      done = true;
     }
     if (!done) {
       const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
@@ -1144,7 +1346,35 @@ addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
-setStatus("Ready — v1.3. On the Quest: open this page in the Quest Browser and tap Enter VR. Hover a city for its name; pull the trigger for full info. On a computer: drag to look, click the planet for info, ↑/↓ to rise and sink, C for curvature.");
+window.__WE_V14__ = {
+  version: "v1.4",
+  portalCosOut: PORTAL_COS_OUT, portalCosIn: PORTAL_COS_IN,
+  bodyWindowCos: [0.9367, 0.9763],
+  hoverAngularK: HOVER_ANGULAR_K,
+  bubbleVRScale: BUBBLE_VR_SCALE, bubbleDesktopScale: BUBBLE_DESKTOP_SCALE,
+  cityTopKm, horizonKm, celestialAltAz,
+  aimStates: Object.keys(aimStates),
+  buildingCount: () => cityBuildings ? cityBuildings.count : 0,
+  celestial: () => celestialBodies.map(b => ({ name: b.name, altAz: b.lastAltAz })),
+  labelCheck: () => labelGroup.children.slice(0, 400).filter(sp => sp.visible).slice(0, 5).map(sp => {
+    const d = camera.getWorldPosition(new THREE.Vector3()).distanceTo(sp.getWorldPosition(new THREE.Vector3()));
+    return { city: sp.userData.city ? sp.userData.city.n : "?", angularRad: sp.scale.x / Math.max(1, d) };
+  }),
+  horizonVisibleKm: (distKm, topKm = 0) => distKm <= horizonKm() + Math.sqrt(2 * R_TRUE * Math.max(0, topKm)),
+  haversineKm,
+  getUserLoc: () => userLoc,
+  setUserLoc: (lat, lon) => { userLoc = { lat, lon }; },
+  setPlayerAltKm: (km) => { altitudeKm = km; applyWorldTransform(); drawHUD(); },
+  getPlayerAltKm: () => altitudeKm,
+  cityLabelVisible: (name) => { const sp = labelGroup.children.find(x => x.userData.city && x.userData.city.n === name); return sp ? sp.visible : null; },
+  ownLabelAngular: () => { const sp = labelGroup.children.find(x => x.userData.city && Math.abs(x.userData.city.la - userLoc.lat) < 1.2 && Math.abs(x.userData.city.lo - userLoc.lon) < 1.2); if (!sp) return null; const d = camera.getWorldPosition(new THREE.Vector3()).distanceTo(sp.getWorldPosition(new THREE.Vector3())); return { city: sp.userData.city.n, visible: sp.visible, angularRad: (sp.scale.x / exaggCur) / Math.max(1, d) }; },
+  labelNames: () => labelGroup.children.map(sp => sp.userData.city ? sp.userData.city.n : "?"),
+  labelAngular: (name) => { const sp = labelGroup.children.find(x => x.userData.city && x.userData.city.n === name); if (!sp) return null; const d = camera.getWorldPosition(new THREE.Vector3()).distanceTo(sp.getWorldPosition(new THREE.Vector3())); return { city: name, visible: sp.visible, angularRad: +(((sp.scale.x / exaggCur) / Math.max(1, d))).toFixed(4), distScene: Math.round(d) }; },
+  portalAmt: () => portalAmt.slice(),
+  aimStatesDetail: () => ({ gaze: !!aimStates.gaze.tgt, left: !!aimStates.left.tgt, right: !!aimStates.right.tgt,
+    gazePanel: aimStates.gaze.panel.mesh.visible, leftPanelObj: aimStates.left.panel !== aimStates.right.panel && aimStates.left.panel !== aimStates.gaze.panel })
+};
+setStatus("Ready — v1.4. On the Quest: open this page in the Quest Browser and tap Enter VR. Hover a city for its name; pull the trigger for full info. On a computer: drag to look, click the planet for info, ↑/↓ to rise and sink, C for curvature.");
 </script>
 </body>
 </html>
